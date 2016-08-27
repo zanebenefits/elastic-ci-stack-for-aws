@@ -56,7 +56,7 @@ Parameters:
       - stable
       - unstable
       - experimental
-    Default: "stable"
+    Default: stable
 
   BuildkiteAgentToken:
     Description: Your Buildkite Agent token
@@ -194,6 +194,12 @@ Conditions:
     UseArtifactsBucket:
       !Not [ !Equals [ $(ArtifactsBucket), "" ] ]
 
+    UseBootstrapScript:
+      !Not [ !Equals [ $(BootstrapScriptUrl), "" ] ]
+
+    UseAuthorizedUsers:
+      !Not [ !Equals [ $(AuthorizedUsersUrl), "" ] ]
+
     UseDefaultAMI:
       !Equals [ $(ImageId), "" ]
 
@@ -202,6 +208,12 @@ Conditions:
 
     UseSpecifiedIamPolicies:
       !Not [ !Equals [ !Join [ "", $(ManagedPolicyArns) ], "" ]  ]
+
+Mappings:
+  BuildkiteAgentReleaseToDocker:
+    stable: {Tag: latest}
+    unstable: {Tag: beta}
+    experimental: {Tag: edge}
 
 Outputs:
   AgentAutoScaleTopic:
@@ -250,7 +262,6 @@ Resources:
             Resource: $(AgentLifecycleQueue[Arn])
           - Effect: Allow
             Action:
-              - logs:CreateLogGroup
               - logs:CreateLogStream
               - logs:PutLogEvents
               - logs:DescribeLogStreams
@@ -300,11 +311,11 @@ Resources:
     Properties:
       AssociatePublicIpAddress: true
       SecurityGroups: [ !If [ "CreateSecurityGroup", $(SecurityGroup), $(SecurityGroupId) ] ]
-      KeyName : $(KeyName)
+      KeyName: $(KeyName)
       IamInstanceProfile: $(IAMInstanceProfile)
       InstanceType: $(InstanceType)
       SpotPrice: !If [ "UseSpotInstances", $(SpotPrice), '$(AWS::NoValue)' ]
-      ImageId : !If [
+      ImageId: !If [
         "UseDefaultAMI",
         "$(AWSRegion2AMI[$(AWS::Region)][AMI])",
         $(ImageId)
@@ -312,137 +323,193 @@ Resources:
       BlockDeviceMappings:
         - DeviceName: /dev/xvda
           Ebs: { VolumeSize: $(RootVolumeSize), VolumeType: gp2 }
-      UserData: !Base64 |
-        #!/bin/bash -xv
-        /opt/aws/bin/cfn-init -s $(AWS::StackId) -r AgentLaunchConfiguration --region $(AWS::Region)
-        /opt/aws/bin/cfn-signal -e \$? -r 'cfn-init finished' \
-          --stack $(AWS::StackName) --resource 'AgentAutoScaleGroup' --region $(AWS::Region)
-        # Here we put any params we want to trigger a restart
-        # $(BuildkiteAgentToken)
-        # $(BuildkiteAgentRelease)
-        # $(BuildkiteQueue)
-        # $(AgentsPerInstance)
-        # $(SecretsBucket)
-        # $(BootstrapScriptUrl)
-
-    Metadata:
-      # see http://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-init.html
-      AWS::CloudFormation::Init:
-        config:
-          commands:
-            01-write-buildkite-env:
-              command: |
-                #!/bin/bash -eu
-
-                cat << EOF > /var/lib/buildkite-agent/cfn-env
-                BUILDKITE_STACK_NAME=$(AWS::StackName)
-                BUILDKITE_SECRETS_BUCKET=$(SecretsBucket)
-                BUILDKITE_AGENTS_PER_INSTANCE=$(AgentsPerInstance)
-                EOF
-
-                chown buildkite-agent: /var/lib/buildkite-agent/cfn-env
-            01-write-lifecycled-config:
-              command: |
-                #!/bin/bash -eu
-
-                cat << EOF > /etc/lifecycled
-                AWS_REGION=$(AWS::Region)
-                LIFECYCLED_DEBUG=true
-                LIFECYCLED_QUEUE=$(AgentLifecycleQueue)
-                LIFECYCLED_INSTANCEID=\$(/opt/aws/bin/ec2-metadata --instance-id | cut -d " " -f 2)
-                LIFECYCLED_HANDLER=/usr/bin/buildkite-agent-lifecycled-handler
-                EOF
-
-                start lifecycled
-            02-restart-docker:
-              command: |
-                #!/bin/bash -eu
-
-                # Sometimes Docker can be unreponsive:
-                # https://github.com/docker/docker/issues/23131
-                # https://github.com/buildkite/elastic-ci-stack-for-aws/issues/86
-                #
-                # As a workaround we start the docker daemon, wait 10 seconds, and verify
-                service docker start || ( cat /var/log/docker && false )
-                sleep 10 && docker info
-            03-install-buildkite:
-              command: |
-                #!/bin/bash -eu
-
-                # Choose the right binary
-
-                ln -s /usr/bin/buildkite-agent-$(BuildkiteAgentRelease) /usr/bin/buildkite-agent
-
-                # Setup the buildkite-agent config
-
-                INSTANCE_ID=\$(/opt/aws/bin/ec2-metadata --instance-id | cut -d " " -f 2)
-                DOCKER_VERSION=\$(docker --version | cut -f3 -d' ' | sed 's/,//')
-
-                # Once 3.0 is stable we can just remove this and let the agent do the right thing
-                if [[ "$(BuildkiteAgentRelease)" == "stable" ]]; then
-                  BOOTSTRAP_SCRIPT="/etc/buildkite-agent/bootstrap.sh"
-                else
-                  BOOTSTRAP_SCRIPT="buildkite-agent bootstrap"
-                fi;
-
-                cat << EOF > /etc/buildkite-agent/buildkite-agent.cfg
-                name="$(AWS::StackName)-\$INSTANCE_ID-%n"
-                token="$(BuildkiteAgentToken)"
-                meta-data=\$(printf 'queue=%s,docker=%s,stack=%s,buildkite-aws-stack' "$(BuildkiteQueue)" "\$DOCKER_VERSION" "$(AWS::StackName)")
-                meta-data-ec2=true
-                bootstrap-script="\$BOOTSTRAP_SCRIPT"
-                hooks-path=/etc/buildkite-agent/hooks
-                build-path=/var/lib/buildkite-agent/builds
-                plugins-path=/var/lib/buildkite-agent/plugins
-                EOF
-
-                chown buildkite-agent: /etc/buildkite-agent/buildkite-agent.cfg
-
-                # Setup logging first so we capture everything
-
-                for i in \$(seq 1 $(AgentsPerInstance)); do
-                  touch /var/log/buildkite-agent-\${i}.log
-
-                  cat << EOF > /etc/awslogs/config/buildkite-agent-\${i}.conf
-                [/var/log/buildkite-agent-\${i}.log]
-                file = /var/log/buildkite-agent-\${i}.log
-                log_group_name = /var/log/buildkite-agent.log
-                log_stream_name = {instance_id}-\${i}
-                datetime_format = %Y-%m-%d %H:%M:%S
-                EOF
-                done
-
-                service awslogs restart
-
-                # Setup and start services
-
-                for i in \$(seq 1 $(AgentsPerInstance)); do
-                  cp /etc/buildkite-agent/init.d.tmpl /etc/init.d/buildkite-agent-\${i}
-                  service buildkite-agent-\${i} start
-                  chkconfig --add buildkite-agent-\${i}
-                done
-
-            04-fetch-authorized-users:
-              test: test -n "$(AuthorizedUsersUrl)"
-              command: |
-                #!/bin/bash -eu
-
-                cat << EOF > /etc/cron.hourly/authorized_keys
-                curl --silent -f "$(AuthorizedUsersUrl)" > /tmp/authorized_keys
-                mv /tmp/authorized_keys /home/ec2-user/.ssh/authorized_keys
-                chmod 600 /home/ec2-user/.ssh/authorized_keys
-                chown ec2-user: /home/ec2-user/.ssh/authorized_keys
-                EOF
-
-                chmod +x /etc/cron.hourly/authorized_keys
-
-                /etc/cron.hourly/authorized_keys
-            05-run-bootstrap-script:
-              test: test -n "$(BootstrapScriptUrl)"
-              command: |
-                #!/bin/bash -euo pipefail
-
-                curl -sSL "$(BootstrapScriptUrl)" | bash
+      UserData:
+        # XXX: No idea how to do this with tags
+        "Fn::Base64":
+          "Fn::Join":
+            - ""
+            - - |2+ # yaml: preserve leading whitespace
+                #cloud-config
+                write_files:
+                  - path: /buildkite/hooks/environment
+                    permissions: 0755
+                    content: |
+                      #!/bin/bash -eu -o pipefail
+                      # Expose the stack name
+                      export BUILDKITE_STACK_NAME="$(AWS::StackName)"
+                      # Start an SSH Agent
+                      eval "\$(ssh-agent -s)"
+              - !If
+                - UseSecretsBucket
+                - |2+ # yaml: preserve leading whitespace
+                        export BUILDKITE_SECRETS_BUCKET="$(SecretsBucket)"
+                        # We need to run awscli from Docker
+                        aws_s3_cp=(docker run --interactive --rm pebbletech/docker-aws-cli aws --region "$(AWS::Region)" s3 cp --quiet)
+                        if [[ -n "\${BUILDKITE_SECRETS_KEY:-}" ]] ; then
+                          aws_s3_cp+=(--sse-c AES256 --sse-c-key "\${BUILDKITE_SECRETS_KEY}")
+                        fi
+                        # Allow environment vars set in Buildkite to override paths
+                        secrets_prefix="\${BUILDKITE_SECRETS_PREFIX:-\$BUILDKITE_PIPELINE_SLUG}"
+                        secrets_url_base="s3://\${BUILDKITE_SECRETS_BUCKET}/\${secrets_prefix}"
+                        ssh_key_url="\${secrets_url_base}/\${SSH_KEY_NAME:-private_ssh_key}"
+                        legacy_ssh_key_url="\${secrets_url_base}/id_rsa_github"
+                        shared_ssh_key_url="s3://\${BUILDKITE_SECRETS_BUCKET}/\${SHARED_SSH_KEY_NAME:-private_ssh_key}"
+                        env_url="\${secrets_url_base}/env"
+                        # Secret SSH key
+                        if ssh_key="\$("\${aws_s3_cp[@]}" "\$ssh_key_url" -)"; then
+                          echo "Adding ssh key from \$ssh_key_url"
+                          ssh-add - <<< "\$ssh_key"
+                        elif legacy_ssh_key="\$("\${aws_s3_cp[@]}" "\$legacy_ssh_key_url" -)"; then
+                          echo "Adding ssh key from \$legacy_ssh_key_url"
+                          ssh-add - <<< "\$legacy_ssh_key"
+                        elif shared_ssh_key="\$("\${aws_s3_cp[@]}" "\$shared_ssh_key_url" -)"; then
+                          echo "Adding ssh key from \$shared_ssh_key_url"
+                          ssh-add - <<< "\$shared_ssh_key"
+                        else
+                          echo "No SSH key found at:"
+                          echo " - \$ssh_key_url"
+                          echo " - \$shared_ssh_key_url"
+                        fi
+                        # Secret environment
+                        if env="\$("\${aws_s3_cp[@]}" "\$env_url" -)"; then
+                          echo "Applying env from \$env_url"
+                          eval "\$env"
+                        else
+                          echo "No environment found at:"
+                          echo " - \$env_url"
+                        fi
+                - $(AWS::NoValue)
+              - |2+ # yaml: preserve leading whitespace
+                  - path: /buildkite/hooks/pre-command
+                    permissions: 0755
+                    content: |
+                      #!/bin/bash -eu -o pipefail
+                      # For logging into the current AWS account’s registry
+                      if [[ -n "\${AWS_ECR_LOGIN:-}" ]]; then
+                        echo "~~~ Authenticating with AWS ECR"
+                        eval "\$(docker run --interactive --rm pebbletech/docker-aws-cli aws ecr get-login)"
+                      fi
+                      # For logging into other AWS account’s registries
+                      if [[ -n "\${AWS_ECR_LOGIN_REGISTRY_IDS:-}" ]]; then
+                        echo "~~~ Authenticating with AWS ECR"
+                        eval "\$(docker run --interactive --rm pebbletech/docker-aws-cli aws ecr get-login --registry_ids "\$AWS_ECR_LOGIN_REGISTRY_IDS")"
+                      fi
+                      # Authenticate with Docker server
+                      if [[ -n "\${DOCKER_LOGIN_USER:-}" && -n "\${DOCKER_LOGIN_PASSWORD:-}" ]]; then
+                        echo "Authenticating with Docker server"
+                        if [[ -n "\${DOCKER_LOGIN_SERVER:-}" ]] ; then
+                          docker login --username="\${DOCKER_LOGIN_USER}" --password="\${DOCKER_LOGIN_PASSWORD}" "\${DOCKER_LOGIN_SERVER}"
+                        else
+                          docker login --username="\${DOCKER_LOGIN_USER}" --password="\${DOCKER_LOGIN_PASSWORD}"
+                        fi
+                        unset DOCKER_LOGIN_USER
+                        unset DOCKER_LOGIN_PASSWORD
+                        unset DOCKER_LOGIN_SERVER
+                      fi
+                  - path: /buildkite/hooks/post-command
+                    permissions: 0755
+                    content: |
+                      #!/bin/bash -eu -o pipefail
+                      # Make sure the ssh-agent dies
+                      ssh-agent -k
+                  - path: /etc/journald-cloudwatch-logs.conf
+                    content: |
+                      log_group = "$(AWS::StackName)"
+                      log_priority = "info"
+                      state_file = "/var/lib/journald-cloudwatch-logs/state"
+                  - path: /opt/bin/buildkite-agent-lifecycled-handler
+                    permissions: 0755
+                    content: |
+                      #!/bin/bash -eu -o pipefail
+                      echo "Telling the Buildkite Agents to stop..."
+                      exec systemctl stop "buildkite-agent@*.service"
+              - |2+ # yaml: preserve leading whitespace
+                coreos:
+                  units:
+                    - name: update-engine.service
+                      command: stop
+                    - name: locksmithd.service
+                      command: stop
+                    - name: buildkite-agent@.service
+                      content: |
+                        [Unit]
+                        PartOf=buildkite-agent.service
+                        [Service]
+                        Restart=always
+                        ExecStartPre=/bin/mkdir -p /buildkite/builds /buildkite/hooks
+                        ExecStart=/bin/bash -eu -o pipefail -c 'exec docker run --name %p-%i --interactive --rm --volume /buildkite/builds:/buildkite/builds --volume /buildkite/hooks:/buildkite/hooks:ro --volume /var/run/docker.sock:/var/run/docker.sock buildkite/agent:$(BuildkiteAgentReleaseToDocker[$(BuildkiteAgentRelease)][Tag]) start --name="$(AWS::StackName)-%H-%n" --token "$(BuildkiteAgentToken)" --meta-data queue="$(BuildkiteQueue)" --meta-data docker="\$(docker --version | cut -f3 -d" " | sed "s/,//")" --meta-data stack="$(AWS::StackName)" --meta-data elastic-ci-stack --meta-data-ec2 true --meta-data aws:private-ip=\$private_ipv4 --meta-data aws:public-ip=\$public_ipv4'
+                        ExecStop=/usr/bin/docker kill --signal SIGTERM %p-%i
+                    - name: buildkite-agent.service
+                      command: start
+                      content: |
+                        [Service]
+                        Type=oneshot
+                        RemainAfterExit=yes
+                        ExecStart=/bin/bash -eu -o pipefail -c 'for i in \$(seq 1 $(AgentsPerInstance)); do systemctl start buildkite-agent@\$i.service; done'
+                    - name: docker-gc.service
+                      content: |
+                        [Service]
+                        Type=oneshot
+                        ExecStart=/usr/bin/docker run --interactive --rm --volume /var/run/docker.sock:/var/run/docker.sock --env GRACE_PERIOD_SECONDS=604800 --env FORCE_IMAGE_REMOVAL=1 spotify/docker-gc
+                    - name: docker-gc.timer
+                      command: start
+                      content: |
+                        [Timer]
+                        OnCalendar=daily
+                    - name: journald-cloudwatch-logs.service
+                      command: start
+                      content: |
+                        [Unit]
+                        After=basic.target network.target
+                        [Service]
+                        ExecStartPre=/bin/install -d /var/lib/journald-cloudwatch-logs
+                        ExecStartPre=/bin/bash -eu -o pipefail -c '[[ -x /opt/bin/journald-cloudwatch-logs ]] || cd /tmp && wget --quiet --continue https://github.com/saymedia/journald-cloudwatch-logs/releases/download/v0.0.1/journald-cloudwatch-logs-linux.zip && unzip -u journald-cloudwatch-logs-linux.zip && install -D /tmp/journald-cloudwatch-logs/journald-cloudwatch-logs /opt/bin/journald-cloudwatch-logs'
+                        ExecStart=/opt/bin/journald-cloudwatch-logs /etc/journald-cloudwatch-logs.conf
+                    - name: lifecycled.service
+                      command: start
+                      content: |
+                        [Service]
+                        Environment=AWS_REGION=$(AWS::Region)
+                        ExecStartPre=/bin/bash -eu -o pipefail -c '[[ -x /opt/bin/lifecycled ]] || install -D <(curl --retry 10 -sfL https://github.com/lox/lifecycled/releases/download/v1.1.3/lifecycled-linux-x86_64) /opt/bin/lifecycled'
+                        ExecStart=/bin/bash -eu -o pipefail -c 'exec /opt/bin/lifecycled --queue "$(AgentLifecycleQueue)" --instanceid "\$(curl --retry 10 -sf http://169.254.169.254/latest/meta-data/instance-id)" --handler /opt/bin/buildkite-agent-lifecycled-handler'
+              - !If
+                - UseBootstrapScript
+                - |2+ # yaml: preserve leading whitespace
+                      - name: bootstrap.service
+                        command: start
+                        content: |
+                          [Unit]
+                          Requires=network.target
+                          [Service]
+                          Type=oneshot
+                          ExecStart=/bin/bash -eu -o pipefail -c 'eval "\$(curl --retry 10 -sfL "$(BootstrapScriptUrl)")"'
+                - $(AWS::NoValue)
+              - !If
+                - UseAuthorizedUsers
+                - |2+ # yaml: preserve leading whitespace
+                      - name: authorized-keys.service
+                        command: start
+                        content: |
+                          [Unit]
+                          Requires=network.target
+                          [Service]
+                          Type=oneshot
+                          ExecStart=/bin/bash -eu -o pipefail -c 'curl --retry 10 -sfL "$(AuthorizedUsersUrl)" > /tmp/authorized_keys && install -o core -m 600 /tmp/authorized_keys ~core/.ssh/authorized_keys'
+                      - name: authorized-keys.timer
+                        command: start
+                        content: |
+                          [Timer]
+                          OnCalendar=hourly
+                - $(AWS::NoValue)
+              - |2+ # yaml: preserve leading whitespace
+                    - name: cfn-signal.service
+                      command: start
+                      content: |
+                        [Unit]
+                        After=network.target buildkite-agent.service lifecycled.service journald-cloudwatch-logs.service bootstrap.service authorized-keys.service
+                        [Service]
+                        Type=oneshot
+                        ExecStart=/bin/bash -eu -o pipefail -c 'exec docker run --interactive --rm aweber/cfn-signal --success=true --reason="Units started" --stack=$(AWS::StackName) --resource=AgentAutoScaleGroup'
 
   AgentLifecycleQueue:
     Type: AWS::SQS::Queue
@@ -533,6 +600,12 @@ Resources:
         # a maximum of 40 minutes to be safe.
         PauseTime: PT40M
         WaitOnResourceSignals: true
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: $(AWS::StackName)
+      RetentionInDays: 7
 
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
