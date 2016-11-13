@@ -22,7 +22,31 @@ steps:
 
   - command: sleep 1
     name: "Run a command on :buildkite: agent - %n"
-    parallelism: 200
+    parallelism: 50
+    timeout_in_minutes: 5
+    env:
+      BUILDKITE_SECRETS_KEY: $BUILDKITE_SECRETS_KEY
+    agents:
+      stack: $stack_name
+      queue: $queue_name
+
+  - wait
+
+  - command: sleep 2
+    name: "Run a command on :buildkite: agent - %n"
+    parallelism: 50
+    timeout_in_minutes: 5
+    env:
+      BUILDKITE_SECRETS_KEY: $BUILDKITE_SECRETS_KEY
+    agents:
+      stack: $stack_name
+      queue: $queue_name
+
+  - wait
+
+  - command: sleep 3
+    name: "Run a command on :buildkite: agent - %n"
+    parallelism: 50
     timeout_in_minutes: 5
     env:
       BUILDKITE_SECRETS_KEY: $BUILDKITE_SECRETS_KEY
