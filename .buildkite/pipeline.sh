@@ -27,6 +27,11 @@ steps:
       docker-compose:
         config: .buildkite/docker-compose.yml
         run: helloworld
+    env:
+      BUILDKITE_SECRETS_KEY: $BUILDKITE_SECRETS_KEY
+    agents:
+      stack: $stack_name
+      queue: $queue_name
 
   - wait
 
