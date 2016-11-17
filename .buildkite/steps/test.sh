@@ -73,7 +73,7 @@ cat << EOF > config.json
   },
   {
     "ParameterKey": "InstanceType",
-    "ParameterValue": "t2.micro"
+    "ParameterValue": "m3.medium"
   },
   {
     "ParameterKey": "SecretsBucket",
