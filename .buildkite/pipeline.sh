@@ -20,17 +20,13 @@ steps:
 
   - wait
 
-  - command: sleep 1
-    name: ":buildkite: %n"
+  - name: ":buildkite: %n"
+    command: /bin/true
     parallelism: 50
-    timeout_in_minutes: 5
-    env:
-      BUILDKITE_SECRETS_KEY: $BUILDKITE_SECRETS_KEY
-    agents:
-      stack: $stack_name
-      queue: $queue_name
-
-  - wait
+    plugins:
+      docker-compose:
+        config: .buildkite/docker-compose.yml
+        run: helloworld
 
   - wait
 

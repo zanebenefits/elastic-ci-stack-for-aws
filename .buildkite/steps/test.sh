@@ -98,6 +98,10 @@ cat << EOF > config.json
   {
     "ParameterKey": "AgentsPerInstance",
     "ParameterValue": "10"
+  },
+  {
+    "ParameterKey": "BuildkiteAgentRelease",
+    "ParameterValue": "unstable"
   }
 ]
 EOF
