@@ -22,7 +22,7 @@ steps:
 
   - name: ":buildkite: %n"
     command: /hello
-    parallelism: 50
+    parallelism: 100
     plugins:
       docker-compose:
         config: .buildkite/docker-compose.yml

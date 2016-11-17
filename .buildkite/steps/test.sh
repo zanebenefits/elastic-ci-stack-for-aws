@@ -93,11 +93,11 @@ cat << EOF > config.json
   },
   {
     "ParameterKey": "MaxSize",
-    "ParameterValue": "10"
+    "ParameterValue": "2"
   },
   {
     "ParameterKey": "AgentsPerInstance",
-    "ParameterValue": "10"
+    "ParameterValue": "20"
   },
   {
     "ParameterKey": "BuildkiteAgentRelease",
