@@ -21,7 +21,7 @@ steps:
   - wait
 
   - name: ":buildkite: %n"
-    command: /bin/true
+    command: /hello
     parallelism: 50
     plugins:
       docker-compose:
