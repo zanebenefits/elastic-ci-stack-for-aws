@@ -34,6 +34,9 @@ cwlogs = cwlogs
 region = $AWS_REGION
 EOF
 
+# Get logs happening as quickly as possible
+service awslogs restart || true
+
 # cfn-env is sourced by the environment hook in builds
 cat << EOF > /var/lib/buildkite-agent/cfn-env
 BUILDKITE_STACK_NAME=$BUILDKITE_STACK_NAME
@@ -109,7 +112,6 @@ done
 
 # my kingdom for a decent init system
 start terminationd || true
-service awslogs restart || true
 
 /opt/aws/bin/cfn-signal \
 	--region "$AWS_REGION" \
