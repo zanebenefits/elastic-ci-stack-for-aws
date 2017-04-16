@@ -359,13 +359,12 @@ Resources:
 
   AgentLaunchConfiguration:
     Type: AWS::AutoScaling::LaunchConfiguration
-    Properties:
+    Properties: &launchConfiguration
       AssociatePublicIpAddress: $(AssociatePublicIpAddress)
       SecurityGroups: [ !If [ "CreateSecurityGroup", $(SecurityGroup), $(SecurityGroupId) ] ]
       KeyName : $(KeyName)
       IamInstanceProfile: $(IAMInstanceProfile)
       InstanceType: $(InstanceType)
-      SpotPrice: !If [ "UseSpotInstances", $(SpotPrice), '$(AWS::NoValue)' ]
       ImageId : !If [
         "UseDefaultAMI",
         "$(AWSRegion2AMI[$(AWS::Region)][AMI])",
@@ -491,3 +490,32 @@ Resources:
       Tags:
       - Key: Name
         Value: $(AWS::StackName)
+
+  SpotFleetIAMRole:
+    Type: AWS::IAM::Role
+    Condition: CreateMetricsStack
+    Properties:
+      RoleName: "$(AWS::StackName)-SpotFleetIAMRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AmazonEC2SpotFleetRole"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ spotfleet.amazonaws.com ]
+            Action: sts:AssumeRole
+      Path: /
+
+  SpotFleet:
+    Type: AWS::EC2::SpotFleet
+    Properties:
+      SpotFleetRequestConfigData:
+        IamFleetRole: !GetAtt IAMFleetRole.Arn
+        SpotPrice: !Ref 'SpotPrice'
+        TerminateInstancesWithExpiration: false
+        AllocationStrategy: lowestPrice
+        TargetCapacity: !Ref MinSize
+        LaunchSpecifications:
+          - <<: *launchConfiguration
+            InstanceType:  c3.large
+            SubnetId: !Join [ ',', !If [ "CreateVpcResources", [ $(Subnet0), $(Subnet1) ], $(Subnets) ] ]
