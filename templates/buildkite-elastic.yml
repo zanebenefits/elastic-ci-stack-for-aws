@@ -510,7 +510,7 @@ Resources:
     Type: AWS::EC2::SpotFleet
     Properties:
       SpotFleetRequestConfigData:
-        IamFleetRole: !GetAtt IAMFleetRole.Arn
+        IamFleetRole: !GetAtt SpotFleetIAMRole.Arn
         SpotPrice: !Ref 'SpotPrice'
         TerminateInstancesWithExpiration: false
         AllocationStrategy: lowestPrice
