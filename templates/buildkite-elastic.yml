@@ -360,7 +360,6 @@ Resources:
   AgentLaunchConfiguration:
     Type: AWS::AutoScaling::LaunchConfiguration
     Properties: &launchConfiguration
-      AssociatePublicIpAddress: $(AssociatePublicIpAddress)
       SecurityGroups: [ !If [ "CreateSecurityGroup", $(SecurityGroup), $(SecurityGroupId) ] ]
       KeyName : $(KeyName)
       IamInstanceProfile: $(IAMInstanceProfile)
